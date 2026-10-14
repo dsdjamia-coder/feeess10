@@ -1,29 +1,36 @@
-# Student Academic Year History & Annual Bulk Promotion System
+# Student Discontinue & Re-admission Management System (വിദ്യാർത്ഥി ഡിസ്കണ്ടിന്യൂ & റീ-അഡ്മിഷൻ)
 
-A unified student management architecture that preserves permanent student identities, maintains comprehensive year-by-year academic and fee history, provides a dedicated read-only historical archive table for past academic years, and introduces an intuitive bulk promotion tool for annual exam progression.
+A comprehensive administrative subsystem for managing student departure (discontinuation) and subsequent re-admission across multiple academic years without data loss, preserving historical fee dues up to the departure date, and recording multi-year gap trajectories with auditable notes.
+
+---
 
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> Based on your confirmed choices in Phase 1, the system is designed with the following core architectural rules:
+> The following product requirements and architectural decisions were confirmed based on user feedback and domain requirements:
 
-- **Confirmed Decision 1: Single Student Profile with Multi-Year History**: Each student maintains a single permanent record (Admission Number, personal details, contact info) with a nested multi-year academic map (`academicYears[yearLabel] = { class, status, division, updatedAt }`). Personal details are never duplicated across years.
-- **Confirmed Decision 2: Dedicated Read-Only Historical Archive Table**: When browsing past academic years, historical records are shown in a dedicated read-only archive view reflecting the exact class, division, and status the student had in that specific year, preventing accidental mutations of historical records.
-- **Confirmed Decision 3: Bulk Promotion Tool with Pass/Retain Controls**: A dedicated annual promotion interface allows administrators to filter by current class, mark each student as Promoted (with automated next-grade suggestion) or Retained (stays in the same class), and commit the transition in a single atomic batch into the next academic year.
+- **Confirmed Decision 1 (Tab Placement)**: Dedicated sub-tab in the Admin sidebar under **Student Management**, titled **"Discontinue & Re-admission" (`ഡിസ്കണ്ടിന്യൂ & റീ-അഡ്മിഷൻ`)** with hashtag `#student-continuity`.
+- **Confirmed Decision 2 (Multi-Year Gap & Trajectory Tracking)**: When a student leaves or returns (even after missing 2–3 academic years), the exact academic year of return is recorded alongside mandatory exit notes (കാരണം) and re-admission notes. The student timeline will explicitly display the discontinuation date, reason, gap duration, return date, and new class assignment.
+- **Confirmed Decision 3 (Fee Continuity & Gap Ledger Discipline)**: Any unpaid fee dues prior to discontinuation remain preserved in the ledger up to the departure date. Crucially, **no fees are assessed or generated for the intervening gap years**. From the exact academic year and date of re-admission onwards, active fee generation resumes normally.
+- **Confirmed Decision 4 (Two-Panel Dedicated View)**: The dedicated tab will feature an **Action & Filter Console** on top (to filter by class and execute discontinuation or re-admission) and a **Live Discontinued Student Directory** below (with search, duration tags, reason tooltips, and 1-click Re-admit dialog).
 
 ---
 
 ## 1. Overview & Core Concept
 
 ### What It Does
-1. **Permanent Student Identity**: When a student is admitted, their core record is created once. Subsequent edits (e.g. phone number, address) update the master profile without altering their historical enrollment trajectory.
-2. **Year-by-Year Academic Trajectory**: Every academic year records the student's specific class, division, enrollment status (Promoted, Retained, Graduated, Active), and concessions for that year.
-3. **Annual Promotion Workflow**: At the conclusion of annual exams, administrators open the Bulk Promotion tool, select source class and target academic year, review auto-promoted classes (e.g., Class 1 -> Class 2), mark any retained students with a single click, and promote the entire batch.
-4. **Historical Archive Viewing**: Selecting any previous academic year displays students in the exact grade and status they had during that specific period in a dedicated read-only table with export capabilities (Excel, CSV, PDF).
+Provides madrasa administrators with a dedicated workspace to manage student continuity:
+1. **Class-Filtered Discontinuation**: Admins select a class, choose a student, enter the departure date and reason (e.g., family relocation, transfer, medical, Madrasa change), and safely transition them to `Discontinued` status.
+2. **Dedicated Discontinued Student Archive**: A dedicated, searchable registry displaying all discontinued students with their admission number, name, original class, exit date, exit reason, and inactive duration (e.g., "1 Year 4 Months / 2 Academic Years").
+3. **Multi-Year Re-admission Modal**: When a student returns after 1, 2, or 3+ academic years, clicking **"Re-admit Student" (`റീ-അഡ്മിഷൻ`)** opens an guided wizard. Admins select the target Academic Year, assign the new Class and Division, enter the return date and reason/notes, and preview the historical gap and preserved prior fee balance.
+4. **Historical Trajectory Integrity**: Discontinuations and re-admissions are written to the student's `continuityLog` array, `academicYears` map, and Firestore audit logs, preventing any overwriting of past records.
+5. **Fee Ledger Insulation**: Fee collection and bulk demand generators will recognize the `Discontinued` state and bypass fee generation for gap periods while displaying pre-discontinuation balances when applicable.
 
-### Target Audience & Persona
-- **School Administrators & Headmasters**: Seamlessly rollover school sessions at the end of each academic year without data loss or re-entering student profiles.
-- **Fee Operators & Office Clerks**: Review historical dues, past payments, and past class rosters for any previous session without conflicting with current active enrollments.
+### Target Audience
+Madrasa Principals, Headmasters (Sadrs), Office Administrators, and Super Admins managing student cohorts across Kerala madrasa academic calendars (May/June to March/April).
+
+### Key Value
+Eliminates confusing manual deactivations or deletion of student records, maintains unbroken academic audit trails across years, and ensures returning students resume their studies with accurate fees and class levels.
 
 ---
 
@@ -31,102 +38,200 @@ A unified student management architecture that preserves permanent student ident
 
 ### Key User Flows
 
-#### Flow 1: Annual Bulk Promotion (`Student Management -> Promote Students`)
-1. Admin navigates to the new **"Promote Students"** tab in the sidebar under Student Management (or via a quick action in Manage Students).
-2. Admin selects:
-   - **Source Academic Year** (e.g., `2024-2025`)
-   - **Source Class** (e.g., `Class 4` or `All Classes`)
-   - **Target Academic Year** (e.g., `2025-2026`)
-3. A clean, tabular roster populates showing:
-   - Admission Number (`font-mono tabular-nums`)
-   - Student Name
-   - Current Class
-   - Promotion Status Toggle: **Promote (Pass)** vs **Retain (Same Class)** vs **Graduate / Transfer**
-   - Target Class Selector (defaults to next class, e.g., Class 5; editable dropdown)
-4. Admin clicks **"Preview & Confirm Promotion"** modal, showing summary counts (e.g., "38 Promoted, 2 Retained, 0 Graduated").
-5. On confirm, Firestore batch updates all records, updates the student's current year/class, and logs an audit log entry.
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       DISCONTINUE & RE-ADMISSION WORKFLOW                    │
+└─────────────────────────────────────────────────────────────────────────────┘
 
-#### Flow 2: Viewing Historical Academic Years (`Manage Students & Archive`)
-1. Admin or staff selects an academic year from the Academic Year selector (or opens the **"Historical Student Archive"**).
-2. If the selected year is not the current active year, the system displays a clear banner: `"Viewing Archive: 2023-2024 (Read-Only Records)"`.
-3. The student table displays each student's class and status *as they were in 2023-2024*.
-4. Edit and delete action buttons are replaced with view and export actions (Excel/PDF) to preserve data integrity.
+  [1. STUDENT LEAVES]
+  Admin Navigation ──> #student-continuity
+       │
+       ▼
+  Top Action Bar:
+  ├── Select Class (e.g. "Class 4 B")
+  ├── Select Student from dropdown or live search
+  ├── Enter Exit Date & Reason (കാരണം / Notes)
+  └── Click "Discontinue Student" (സുരക്ഷിതമായി ഡിസ്കണ്ടിന്യൂ ചെയ്യുക)
+       │
+       ▼
+  [Confirmation Modal] ──> Commit to Firestore:
+       • status: 'Discontinued'
+       • continuityLog appended
+       • academicYears[currentYear].status = 'Discontinued'
+       • Audit log generated
+
+  ─────────────────────────────────────────────────────────────────────────────
+
+  [2. DISCONTINUED DIRECTORY]
+  Real-time List Table:
+  ├── Photo, Adm No, Name, Gender
+  ├── Class at Departure & Academic Year
+  ├── Exit Date & Recorded Reason (Note pill/tooltip)
+  ├── Inactive Gap Duration (e.g., "2 Years 1 Month")
+  ├── Outstanding Fees prior to exit (₹ Preserved)
+  └── [Re-admit Student] Button & [View Trajectory] Button
+
+  ─────────────────────────────────────────────────────────────────────────────
+
+  [3. STUDENT RETURNS (RE-ADMISSION)]
+  Click "Re-admit Student" ──> Guided Modal:
+  ├── Current Info: Name, Adm No, Last Studied Class
+  ├── Target Academic Year: Dropdown of active/future years
+  ├── Target New Class: Dropdown with suggested next class
+  ├── Return Date & Re-admission Notes (റീ-അഡ്മിഷൻ കാരണം)
+  ├── Gap Summary: "2 missed academic years: 2024-2025, 2025-2026"
+  ├── Fee Status Preview: "Preserved prior dues: ₹400. No gap fees charged."
+  └── Commit Re-admission ──> Student status becomes 'Active', joins new class!
+```
 
 ### Visual Identity & Theme
-- **Color Discipline**: Clean white/neutral canvas (`#F8FAFC` to `#FFFFFF`), structural borders (`border-slate-200`), deep indigo accents for academic navigation (`#4338CA`), emerald accents for promotions (`#059669`), and amber for retentions (`#D97706`).
-- **Typography**: Clean sans headers with tabular numerals (`tabular-nums font-mono`) for admission numbers, student roll counts, and statistics.
-- **Zero-Pill Discipline**: Status labels rendered as clean text with typographic dividers (e.g., `Class 4 · Promoted to 5 · 2024-2025`), with interactive segmented tabs for filter controls.
+- **Layout & Structure**: Follows the Universal Frontend Design Constitution (SaaS Dashboard domain). Full 1440px desktop width, single-elevation cards with clean hairline borders (`border border-slate-200 dark:border-slate-800`), and generous whitespace.
+- **Color Palette & Discipline (60-30-10)**:
+  - `60% Neutral Canvas`: Crisp slate background (`bg-slate-50 / bg-white`).
+  - `30% Structural Surfaces`: Clean white cards with `border-slate-200` and subtle slate headers.
+  - `10% Accent Palette`:
+    - Discontinue action: Warm rose/crimson accents (`bg-rose-600 hover:bg-rose-700`, text badges `bg-rose-50 text-rose-700 border-rose-200`).
+    - Re-admission action: Emerald/teal accents (`bg-emerald-600 hover:bg-emerald-700`, text badges `bg-emerald-50 text-emerald-700 border-emerald-200`).
+    - Gap metadata: Unboxed muted typography with bullet separators (`·`).
+- **Typography & Tabular Discipline**:
+  - Headings: `Plus Jakarta Sans` font.
+  - Metrics, Adm Numbers, Dates, and Fees: `font-mono tabular-nums` for alignment without jitter.
+  - Bilingual Malaylam + English labels to ensure intuitive day-to-day operation for Madrasa staff.
+- **Zero-Pill Discipline**:
+  - Tags and metadata (dates, missed years) rendered as unboxed quiet text separated by `·`.
+  - Filter controls rendered as functional segmented button tabs.
 
 ---
 
 ## 3. Key Product Decisions & Trade-Offs
 
-### Decision 1: Hybrid Data Model (Master Profile + Year History Map + Enrollment Index)
-- **Chosen Approach**:
-  - Master student record (`students/{studentId}`) contains personal info + `academicYear` (current year) + `class` (current class) + `academicYears: { [yearLabel]: { class, status, division, updatedAt } }`.
-  - In addition, write lightweight enrollment documents to `academicYears/{yearDocId}/enrollments/{studentId}`.
-- **Why**: Allows instant query of active students for the current year without expensive map lookups, while giving instant read-only lookups for past years.
-- **Alternatives Considered**: Duplicating full student documents into each year collection (violates Single Source of Truth; editing student phone number would require updating multiple documents).
+### Decision 1: Single Student Document with `continuityLog` and `academicYears` Map
+- **Chosen Approach**: Retain the student's unique ID (`admissionNo` / doc ID). Add an array `continuityLog` storing each status transition, and update `academicYears[yearLabel]` with the exact class and status for that specific year.
+- **Why**: Keeps student fees, receipts, attendance, and exam marks connected to one master identity. When generating multi-year reports or certificates, the full history is readily available without creating duplicated or orphaned student records.
+- **Alternative Considered**: Creating a new student document upon re-admission was rejected because it fragments student ID, breaks fee continuity, and loses past attendance history.
 
-### Decision 2: Automated Class Progression Heuristic
-- **Chosen Approach**: The promotion tool automatically maps standard numeric classes to the next level (e.g., `1 -> 2`, `9 -> 10`, `10 -> Graduated/Plus One`) while providing a fast per-student dropdown override for special divisions (e.g., moving from `4` to `5 A` or `5 B`).
-- **Why**: Saves 95% of manual clicking for large classes while retaining complete flexibility for school-specific division assignments.
+### Decision 2: Fee Preservation & Gap Immunity
+- **Chosen Approach**: When a student is discontinued:
+  1. All payments made and pending fee items generated up to their discontinuation date remain intact.
+  2. The fee engine filters out `Discontinued` students when generating monthly or annual fee dues.
+  3. Upon re-admission, active fee generation starts from the re-admission date / target academic year.
+- **Why**: Strictly adheres to the user's explicit rule: *"എന്നാണോ പോയത്? അതുവരെയുള്ള ഫീസുകൾ ഉണ്ടെങ്കിൽ അത് കാണിക്കണം പിന്നീട് എന്നാണോ വരുന്നത് അന്ന് മുതൽ ഉള്ളതാണ് ഉണ്ടാവുക. ഡിസ്ക കണ്ടിന്യൂ ചെയ്തതു മുതൽ കണ്ടിന്യൂ ചെയ്യുന്നതുവരെ ഉള്ളത് ഉണ്ടാവുകയില്ല."*
 
-### Decision 3: Backward-Compatible Graceful Fallback
-- **Chosen Approach**: Existing student documents without `academicYears` map are seamlessly backfilled on the fly when read by reading `student.academicYear` and `student.class`, ensuring zero loss or disruption for existing student data.
+### Decision 3: Mandatory Exit & Re-entry Reasons
+- **Chosen Approach**: Both discontinuation and re-admission forms require an administrative note / reason field.
+- **Why**: In Madrasa management, students frequently move to relatives' houses, attend other institutions for higher school, or return years later. Preserving explicit notes explains gaps on official transfer certificates and parent inquiries.
 
 ---
 
 ## 4. Technical Architecture & Data Strategy
 
+### System Component Diagram
+
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        Master Student Profile                          │
-│               Collection: /artifacts/.../students/{studentId}          │
-├────────────────────────────────────────────────────────────────────────┤
-│  adm: "1024"                       name: "Aisha Rahman"                │
-│  gender: "Female"                  phone: "9876543210"                 │
-│  status: "Active"                                                      │
-│  currentAcademicYear: "2025-2026"  class: "5 A"                        │
-│                                                                        │
-│  academicYears: {                                                      │
-│    "2024-2025": { class: "4 A", status: "Promoted", updatedAt: ... },  │
-│    "2025-2026": { class: "5 A", status: "Active",   updatedAt: ... }   │
-│  }                                                                     │
-└─────────────────────────────────┬──────────────────────────────────────┘
-                                  │
-          ┌───────────────────────┴───────────────────────┐
-          ▼                                               ▼
-┌───────────────────────────────┐               ┌───────────────────────────────┐
-│ Current Academic Year View    │               │ Historical Archive Table      │
-│ (Active Roster & Edits)       │               │ (Read-Only Past Year View)    │
-├───────────────────────────────┤               ├───────────────────────────────┤
-│ • Filters by Current Year     │               │ • Filter by Selected Past Year│
-│ • Full CRUD & Concessions     │               │ • Shows Class in THAT Year    │
-│ • Feeds Fee Collection Hub    │               │ • Read-Only / Export Ready    │
-└──────────────┬────────────────┘               └───────────────────────────────┘
-               │
-               ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                   Annual Bulk Promotion Workflow                       │
-│              (Source Year: 2024-2025 ──► Target Year: 2025-2026)      │
-├────────────────────────────────────────────────────────────────────────┤
-│ • Renders class roster with Promoted / Retained radio or switch        │
-│ • Auto-computes target class (e.g. 4 A -> 5 A)                         │
-│ • Atomic writeBatch commits both master student and enrollment history │
-└────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        ADMIN PORTAL COMPONENT MAP                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  admin.html
+  ├── Sidebar Navigation: <a href="#student-continuity">
+  │
+  ├── Section: #student-continuity-page
+  │   ├── Header & Contextual Academic Year Indicator
+  │   │
+  │   ├── Panel A: "Discontinue Student" (വിദ്യാർത്ഥിയെ ഡിസ്കണ്ടിന്യൂ ചെയ്യുക)
+  │   │   ├── Class Selector (#continuity-class-select)
+  │   │   ├── Student Selector (#continuity-student-select)
+  │   │   ├── Departure Date (#continuity-exit-date)
+  │   │   ├── Departure Reason / Notes (#continuity-exit-reason)
+  │   │   └── Action: #execute-discontinue-btn
+  │   │
+  │   └── Panel B: "Discontinued Students Archive" (ഡിസ്കണ്ടിന്യൂ ചെയ്തവർ)
+  │       ├── Metrics Counter (Total Discontinued, Current Year Departures)
+  │       ├── Search Input & Class Filter (#continuity-search-input)
+  │       ├── Responsive Table (#discontinued-students-table-body)
+  │       └── Action Buttons:
+  │           ├── Re-admit (#btn-open-readmit)
+  │           └── View History & Notes (#btn-view-continuity-history)
+  │
+  └── Modals:
+      ├── #readmission-popup: Target Year, Target Class, Date, Notes, Gap Review
+      └── #continuity-history-popup: Multi-year visual timeline of departures/returns
+
+  ─────────────────────────────────────────────────────────────────────────────
+
+  scripts/pages/admin-page.js
+  ├── State: rawStudents, students, academicYears, feeItems, allPayments
+  ├── Router: '#student-continuity' page activation
+  ├── Handlers:
+  │   ├── renderContinuityPage()
+  │   ├── populateContinuityStudentDropdown()
+  │   ├── handleDiscontinueStudent()
+  │   ├── openReadmitModal()
+  │   ├── handleExecuteReadmission()
+  │   └── openContinuityHistoryModal()
+  └── Firestore Mutations:
+      └── updateDoc(studentRef, { status, continuityLog, academicYears, ... })
 ```
 
-### Component & File Strategy
-1. **`admin.html`**:
-   - Add **"Promote Students"** navigation link in sidebar under "Student Management".
-   - Add `<section id="promote-students-page" class="page hidden">` with source year, source class, target year controls, and batch action table.
-   - Add **"Historical Archive"** toggle or mode in `manage-students-page` when an archived or non-current academic year is selected.
-2. **`scripts/pages/admin-page.js`**:
-   - `renderPromotionTool()`: Loads students for source year, renders promotion table with auto-suggested next classes.
-   - `executeBulkPromotion()`: Executes `runBatchedWrites` updating `student.academicYears[targetYear]`, `student.class`, `student.academicYear`, and enrollment indices.
-   - `getStudentsForAcademicYear(yearLabel)`: Enhanced selector that checks `student.academicYears?.[yearLabel]` or `student.academicYear === yearLabel`.
-   - `renderHistoricalArchiveTable(yearLabel)`: Read-only rendering with past status and class indicators.
-3. **Firestore Security & Blueprint (`firebase-blueprint.json` & `firestore.rules`)**:
-   - Ensure `academicYears` map property is documented in the student entity schema.
-   - Validate batch update operations are fully supported within security rules.
+### Data Schema Extensions (`firebase-blueprint.json` & Firestore)
+
+1. **Student Entity Updates**:
+   - `status`: String enum now includes `'Active' | 'Inactive' | 'Graduated' | 'Discontinued'`.
+   - `discontinuationDetails`:
+     ```typescript
+     {
+       date: string;          // ISO date
+       academicYear: string;  // e.g. "2024-2025"
+       lastClass: string;     // e.g. "Class 4"
+       reason: string;        // Notes on why student left
+       recordedBy: string;    // Admin user email
+     }
+     ```
+   - `readmissionDetails`:
+     ```typescript
+     {
+       date: string;          // ISO date
+       targetYear: string;    // e.g. "2026-2027"
+       targetClass: string;   // e.g. "Class 6"
+       reason: string;        // Notes on return
+       gapYears: string[];    // e.g. ["2024-2025", "2025-2026"]
+       recordedBy: string;
+     }
+     ```
+   - `continuityLog`: Array of historical events:
+     ```typescript
+     Array<{
+       id: string;
+       type: 'discontinue' | 'readmit';
+       timestamp: string;
+       academicYear: string;
+       class: string;
+       reason: string;
+       adminEmail: string;
+       priorBalance?: number;
+     }>
+     ```
+
+2. **Fee Generation & Collection Scoping**:
+   - `collection-page.js` & `admin-page.js` fee calculations will treat `Discontinued` students as non-accruing for any fee cycles occurring after their discontinuation timestamp and before their re-admission timestamp.
+   - Any payments made against prior balances will continue to be recorded against the student's unique ID.
+
+---
+
+## 5. Implementation Steps (To Be Executed After Approval)
+
+1. **Update `firebase-blueprint.json` & Rules**:
+   - Add `Discontinued` to allowed statuses and specify `continuityLog`, `discontinuationDetails`, and `readmissionDetails` schemas.
+   - Run verification and deploy rules via `DeployRules` RPC if necessary.
+2. **Add Navigation & UI Markup in `admin.html`**:
+   - Insert the sidebar navigation link `#student-continuity`.
+   - Build `#student-continuity-page` with the Discontinue Action form and Discontinued Directory table.
+   - Add `#readmission-popup` and `#continuity-history-popup`.
+3. **Implement Logic in `scripts/pages/admin-page.js`**:
+   - Add `student-continuity` to `PAGE_PERMISSIONS` (`students.manage`).
+   - Implement event listeners, dropdown synchronization, table rendering, and gap duration calculations.
+   - Implement `handleDiscontinueStudent` and `handleExecuteReadmission` with Firestore batch/update operations and audit logging.
+4. **Integrate Fee Continuity**:
+   - Ensure fee summaries in `collection-page.js` and `admin-page.js` properly exclude discontinued students from active periodic demand generation while preserving past ledger dues.
+5. **Compile & Verify**:
+   - Run `compile_applet` and test all edge cases (immediate re-admission, multi-year gap re-admission, notes rendering, and fee ledger display).
