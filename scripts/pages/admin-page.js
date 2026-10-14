@@ -60,6 +60,7 @@ const PAGE_PERMISSIONS = {
     'manage-staff': 'staff.manage',
     'add-students': 'students.manage',
     'manage-students': 'students.manage',
+    'promote-students': 'students.manage',
     'manage-classes': 'classes.manage',
     'manage-groups': 'groups.manage',
     results: 'results.manage',
@@ -402,15 +403,67 @@ const enforceSetupGate = () => {
     if (statusEl && !isSetupReady) statusEl.textContent = 'Complete Academic Year + Classes first';
     return isSetupReady;
 };
-const getStudentsForActiveYear = () => rawStudents.filter((student) => {
-    const studentYear = student.academicYear || currentAcademicYear;
-    return studentYear === getActiveAcademicYearLabel();
-});
-const getClassesForActiveYear = () => {
-    const activeYearRecord = getActiveAcademicYearRecord();
-    const structuredClasses = Array.isArray(activeYearRecord?.classes) ? activeYearRecord.classes : [];
-    const studentClasses = getStudentsForActiveYear().map((student) => student.class).filter(Boolean);
+const getStudentsForYear = (targetYearLabel) => {
+    const target = targetYearLabel || getActiveAcademicYearLabel();
+    const activeLabel = getActiveAcademicYearLabel();
+    return (rawStudents || []).map((student) => {
+        const yearEntry = student.academicYears?.[target];
+        const studentMasterYear = student.academicYear || currentAcademicYear;
+        const isCurrentYear = studentMasterYear === target;
+
+        if (yearEntry && typeof yearEntry === 'object') {
+            return {
+                ...student,
+                _historicalYear: target,
+                _isHistoricalView: target !== activeLabel,
+                class: yearEntry.class || student.class,
+                studentClass: yearEntry.class || student.studentClass || student.class,
+                status: yearEntry.status || student.status
+            };
+        } else if (isCurrentYear) {
+            return {
+                ...student,
+                _historicalYear: target,
+                _isHistoricalView: target !== activeLabel
+            };
+        } else if (!student.academicYear && (!student.academicYears || Object.keys(student.academicYears).length === 0) && target === activeAcademicYear) {
+            return {
+                ...student,
+                _historicalYear: target,
+                _isHistoricalView: target !== activeLabel
+            };
+        }
+        return null;
+    }).filter(Boolean);
+};
+
+const getStudentsForActiveYear = () => getStudentsForYear(getActiveAcademicYearLabel());
+
+const getClassesForYear = (targetYearLabel) => {
+    const target = targetYearLabel || getActiveAcademicYearLabel();
+    const yearRecord = academicYears.find((year) => year.label === target);
+    const structuredClasses = Array.isArray(yearRecord?.classes) ? yearRecord.classes : [];
+    const studentClasses = getStudentsForYear(target).map((student) => student.class).filter(Boolean);
     return sortClassLabels([...new Set([...structuredClasses, ...studentClasses])]);
+};
+
+const getClassesForActiveYear = () => getClassesForYear(getActiveAcademicYearLabel());
+
+const suggestNextClass = (currentClassStr) => {
+    if (!currentClassStr) return '';
+    const trimmed = String(currentClassStr).trim();
+    if (trimmed.toUpperCase() === 'GRADUATED') return 'GRADUATED';
+    const match = trimmed.match(/^(.*?)(\d+)(\s*[A-Za-z])?$/i);
+    if (match) {
+        const prefix = match[1] || '';
+        const num = parseInt(match[2], 10);
+        const division = match[3] || '';
+        if (num >= 12) return 'GRADUATED';
+        if (num === 10 && !prefix.toLowerCase().includes('plus')) return (prefix + '11' + division).trim();
+        const nextNum = num + 1;
+        return `${prefix}${nextNum}${division}`.trim();
+    }
+    return trimmed;
 };
 const setAcademicYearBadges = () => {
     const activeYear = getActiveAcademicYearLabel();
@@ -930,6 +983,7 @@ const refreshAcademicYearScopedData = () => {
     students = getStudentsForActiveYear();
     classes = getClassesForActiveYear();
     setAcademicYearBadges();
+    populateManageAcademicYearDropdown();
     populateClassDropdowns();
     if (typeof populateResultSelectors === 'function') populateResultSelectors();
     enforceSetupGate();
@@ -937,6 +991,7 @@ const refreshAcademicYearScopedData = () => {
 
     if(!document.getElementById('manage-classes-page').classList.contains('hidden')) renderClassList();
     if(!document.getElementById('manage-students-page').classList.contains('hidden')) renderStudentList();
+    if(!document.getElementById('promote-students-page')?.classList.contains('hidden')) renderPromotionTool();
     if(!document.getElementById('manage-groups-page').classList.contains('hidden')) renderStudentGroups();
     if(!document.getElementById('fee-concessions-page').classList.contains('hidden')) renderConcessionsList();
 };
@@ -1153,7 +1208,8 @@ const activateAdminPage = (targetId, options = {}) => {
 
     if(targetId === 'dashboard') renderDashboard();
     if(targetId === 'academic-years') renderAcademicYears();
-    if(targetId === 'manage-students') { populateClassDropdowns(); renderStudentList(); }
+    if(targetId === 'manage-students') { populateManageAcademicYearDropdown(); populateClassDropdowns(); renderStudentList(); }
+    if(targetId === 'promote-students') renderPromotionTool();
     if(targetId === 'manage-classes') { populateClassDropdowns(); renderClassList(); }
     if(targetId === 'manage-groups') renderStudentGroups();
     if(targetId === 'results') renderResultManagement();
@@ -2871,13 +2927,21 @@ document.getElementById('add-manual-btn')?.addEventListener('click', async () =>
         const addressVal = document.getElementById('add-stu-address')?.value?.trim() || '';
         const statusVal = normalizeStudentStatus(document.getElementById('add-stu-status')?.value || 'Active');
 
+        const studentActiveYear = activeAcademicYear || currentAcademicYear;
         const nextStudent = {
-            academicYear: activeAcademicYear || currentAcademicYear,
+            academicYear: studentActiveYear,
             class: cls,
             studentClass: cls, // Save both for compatibility with React
             name: name,
             gender: gender,
             status: statusVal,
+            academicYears: {
+                [studentActiveYear]: {
+                    class: cls,
+                    status: statusVal,
+                    updatedAt: new Date().toISOString()
+                }
+            },
             uid: uidVal,
             adm: admVal,
             mobile: mobileVal,
@@ -2985,7 +3049,138 @@ const populateClassDropdowns = () => {
     }
 };
 
+const populateManageAcademicYearDropdown = () => {
+    const yearSelect = document.getElementById('filter-manage-academic-year');
+    if (!yearSelect) return;
+    const currentSelected = yearSelect.value || getActiveAcademicYearLabel();
+    const sortedYears = [...academicYears].sort((a, b) => (b.startYear || 0) - (a.startYear || 0));
+
+    if (sortedYears.length === 0) {
+        yearSelect.innerHTML = `<option value="${escapeHtml(currentAcademicYear)}">${escapeHtml(currentAcademicYear)} (Current)</option>`;
+        return;
+    }
+
+    yearSelect.innerHTML = sortedYears.map((y) => {
+        const isCurrent = y.label === activeAcademicYear;
+        const isArchived = y.status === 'archived';
+        const tag = isCurrent ? ' (Current)' : (isArchived ? ' (Archive)' : ' (Active)');
+        return `<option value="${escapeHtml(y.label)}">${escapeHtml(y.label)}${tag}</option>`;
+    }).join('');
+
+    if (sortedYears.some((y) => y.label === currentSelected)) {
+        yearSelect.value = currentSelected;
+    } else {
+        yearSelect.value = getActiveAcademicYearLabel();
+    }
+};
+
+const openStudentHistoryModal = (studentId) => {
+    const student = rawStudents.find(s => s.id === studentId);
+    if (!student) return alert('Student not found.');
+    
+    const summaryContainer = document.getElementById('student-history-profile-summary');
+    const timelineContainer = document.getElementById('student-history-timeline-container');
+    const popup = document.getElementById('student-history-popup');
+    if (!summaryContainer || !timelineContainer || !popup) return;
+
+    const stuPhoto = student.photo || student.profile?.photo || '';
+    const prof = student.profile || {};
+    const currentClass = student.class || student.studentClass || prof.class || '--';
+    const status = normalizeStudentStatus(student.status || prof.status);
+
+    summaryContainer.innerHTML = `
+        <div class="w-16 h-16 rounded-full overflow-hidden bg-white border-2 border-slate-200 flex items-center justify-center shrink-0 shadow-sm">
+            ${stuPhoto ? `<img src="${stuPhoto}" class="w-full h-full object-cover">` : `<i class="fas fa-user text-slate-400 text-2xl"></i>`}
+        </div>
+        <div class="flex-1 text-center sm:text-left">
+            <div class="flex flex-wrap items-center justify-center sm:justify-start gap-2">
+                <h4 class="text-lg font-black text-gray-900">${escapeHtml(student.name || '--')}</h4>
+                <span class="px-2.5 py-0.5 rounded-full text-xs font-bold border ${getStudentStatusBadgeClass(status)}">${escapeHtml(status)}</span>
+            </div>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs text-gray-600 mt-2">
+                <div><span class="text-gray-400 block font-bold">Adm. No:</span> <span class="font-mono font-bold">${escapeHtml(student.adm || prof.admNo || '-')}</span></div>
+                <div><span class="text-gray-400 block font-bold">Current Class:</span> <span class="font-bold text-indigo-700">${escapeHtml(currentClass)}</span></div>
+                <div><span class="text-gray-400 block font-bold">Gender:</span> <span>${escapeHtml(student.gender || prof.gender || '-')}</span></div>
+                <div><span class="text-gray-400 block font-bold">Mobile:</span> <span>${escapeHtml(student.mobile || prof.mobile || '-')}</span></div>
+            </div>
+        </div>
+    `;
+
+    const historyMap = student.academicYears || {};
+    const recordedYears = Object.keys(historyMap);
+
+    const entries = [];
+    if (recordedYears.length === 0) {
+        entries.push({
+            yearLabel: student.academicYear || currentAcademicYear,
+            class: currentClass,
+            status: status,
+            updatedAt: student.updatedAt || null
+        });
+    } else {
+        recordedYears.forEach(yearLabel => {
+            const entry = historyMap[yearLabel] || {};
+            entries.push({
+                yearLabel,
+                class: entry.class || currentClass,
+                status: entry.status || 'Active',
+                decision: entry.decision || null,
+                updatedAt: entry.updatedAt || null
+            });
+        });
+    }
+
+    entries.sort((a, b) => b.yearLabel.localeCompare(a.yearLabel));
+
+    timelineContainer.innerHTML = entries.map((entry) => {
+        const isCurrent = entry.yearLabel === getActiveAcademicYearLabel();
+        const entryStatus = normalizeStudentStatus(entry.status);
+        const formattedDate = entry.updatedAt ? new Date(entry.updatedAt).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : 'Recorded';
+
+        return `
+            <div class="p-3.5 rounded-xl border ${isCurrent ? 'border-indigo-200 bg-indigo-50/50' : 'border-gray-200 bg-white'} shadow-2xs transition">
+                <div class="flex items-center justify-between flex-wrap gap-2">
+                    <div class="flex items-center gap-2">
+                        <span class="text-sm font-black text-gray-900">${escapeHtml(entry.yearLabel)}</span>
+                        ${isCurrent ? '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-200">Current Session</span>' : '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-gray-100 text-gray-600">Past Session</span>'}
+                    </div>
+                    <div class="text-[11px] text-gray-400 font-medium">${escapeHtml(formattedDate)}</div>
+                </div>
+                <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-2 pt-2 border-t border-gray-100 text-xs">
+                    <div>
+                        <span class="text-gray-500 block text-[10px] font-bold uppercase">Class in that year:</span>
+                        <span class="font-extrabold text-gray-900 text-sm">${escapeHtml(entry.class || '--')}</span>
+                    </div>
+                    <div>
+                        <span class="text-gray-500 block text-[10px] font-bold uppercase">Year Status:</span>
+                        <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-bold border mt-0.5 ${getStudentStatusBadgeClass(entryStatus)}">${escapeHtml(entryStatus)}</span>
+                    </div>
+                    <div>
+                        <span class="text-gray-500 block text-[10px] font-bold uppercase">Progression:</span>
+                        <span class="text-xs font-semibold text-gray-700">${entry.decision ? escapeHtml(entry.decision.toUpperCase()) : 'Enrolled'}</span>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    popup.classList.remove('hidden');
+    popup.classList.add('flex');
+};
+
+document.getElementById('student-history-close-btn')?.addEventListener('click', () => {
+    document.getElementById('student-history-popup')?.classList.add('hidden');
+    document.getElementById('student-history-popup')?.classList.remove('flex');
+});
+document.getElementById('student-history-done-btn')?.addEventListener('click', () => {
+    document.getElementById('student-history-popup')?.classList.add('hidden');
+    document.getElementById('student-history-popup')?.classList.remove('flex');
+});
+
 const renderStudentList = () => {
+    const selectedYear = document.getElementById('filter-manage-academic-year')?.value || getActiveAcademicYearLabel();
+    const isActiveYear = selectedYear === getActiveAcademicYearLabel();
+
     const fCls = document.getElementById('filter-manage-class').value;
     const fGen = document.getElementById('filter-manage-gender').value;
     const fStatus = document.getElementById('filter-manage-status').value;
@@ -2993,10 +3188,29 @@ const renderStudentList = () => {
     const sTerm = document.getElementById('search-student-input').value.toLowerCase();
     const cont = document.getElementById('student-list-container');
     const emptyState = document.getElementById('student-list-empty-state');
+    const archiveBanner = document.getElementById('historical-archive-banner');
+    const archiveYearLabel = document.getElementById('historical-archive-year-label');
+    const yearBadge = document.getElementById('manage-students-year-badge');
+
+    if (yearBadge) {
+        yearBadge.textContent = `Academic Year: ${selectedYear} ${isActiveYear ? '(Current & Editable)' : '(Historical Archive - Read Only)'}`;
+        yearBadge.className = `text-xs font-bold uppercase tracking-widest mt-1 ${isActiveYear ? 'text-indigo-600' : 'text-amber-700'}`;
+    }
+
+    if (archiveBanner) {
+        if (!isActiveYear) {
+            archiveBanner.classList.remove('hidden');
+            if (archiveYearLabel) archiveYearLabel.textContent = selectedYear;
+        } else {
+            archiveBanner.classList.add('hidden');
+        }
+    }
 
     emptyState.classList.add('hidden'); cont.classList.remove('hidden');
 
-    const fil = students.filter(s => {
+    const yearStudents = getStudentsForYear(selectedYear);
+
+    const fil = yearStudents.filter(s => {
         let match = true;
         if(fCls !== 'all') {
             if (fCls === 'GRADUATED') match = match && (normalizeStudentStatus(s.status) === 'Graduated' || String(s.class || '').toUpperCase() === 'GRADUATED');
@@ -3004,7 +3218,7 @@ const renderStudentList = () => {
         }
         if(fGen !== 'all') match = match && s.gender === fGen;
         if(fStatus !== 'all') match = match && normalizeStudentStatus(s.status) === fStatus;
-        if(sTerm) match = match && (s.name.toLowerCase().includes(sTerm) || (s.adm && s.adm.toLowerCase().includes(sTerm)));
+        if(sTerm) match = match && ((s.name && s.name.toLowerCase().includes(sTerm)) || (s.adm && String(s.adm).toLowerCase().includes(sTerm)));
         return match;
     });
 
@@ -3039,6 +3253,22 @@ const renderStudentList = () => {
     fil.forEach((s, i) => {
         const status = normalizeStudentStatus(s.status);
         const stuPhoto = s.photo || s.profile?.photo || '';
+        let actionButtons = '';
+
+        if (!isActiveYear) {
+            actionButtons = `
+                <button class="view-student-history-btn bg-indigo-50 text-indigo-700 hover:bg-indigo-100 px-3 py-1.5 rounded-md text-xs font-bold transition flex items-center gap-1.5 ml-auto" data-id="${s.id}">
+                    <i class="fas fa-history"></i> History
+                </button>
+            `;
+        } else {
+            actionButtons = `
+                <button class="view-student-history-btn bg-indigo-50 text-indigo-700 hover:bg-indigo-100 px-2.5 py-1.5 rounded-md mr-1.5 text-xs font-bold transition" data-id="${s.id}" title="Academic History"><i class="fas fa-history"></i></button>
+                <button class="edit-student-btn bg-blue-50 text-blue-600 hover:bg-blue-100 px-3 py-1.5 rounded-md mr-1.5 text-xs font-bold transition" data-id="${s.id}"><i class="fas fa-edit"></i> Edit</button>
+                <button class="delete-student-btn bg-red-50 text-red-600 hover:bg-red-100 px-2.5 py-1.5 rounded-md text-xs font-bold transition" data-id="${s.id}"><i class="fas fa-trash"></i></button>
+            `;
+        }
+
         html += `
         <tr class="hover:bg-gray-50 bg-white">
             <td class="p-3 text-center font-bold text-gray-400">${i + 1}</td>
@@ -3052,13 +3282,24 @@ const renderStudentList = () => {
             <td class="p-3 text-gray-600"><div>${escapeHtml(s.class || '--')} (${escapeHtml(s.gender || '--')})</div><div class="mt-1 inline-flex px-2 py-0.5 rounded-full border text-xs font-bold ${getStudentStatusBadgeClass(status)}">${escapeHtml(status)}</div></td>
             <td class="p-3 text-gray-500">${escapeHtml(s.mobile || '-')}</td>
             <td class="p-3 text-right">
-                <button class="edit-student-btn bg-blue-50 text-blue-600 hover:bg-blue-100 px-3 py-1.5 rounded-md mr-2" data-id="${s.id}"><i class="fas fa-edit"></i> Edit</button>
-                <button class="delete-student-btn bg-red-50 text-red-600 hover:bg-red-100 px-3 py-1.5 rounded-md" data-id="${s.id}"><i class="fas fa-trash"></i></button>
+                ${actionButtons}
             </td>
         </tr>`;
     });
     cont.innerHTML = html + `</tbody></table>`;
 };
+document.getElementById('filter-manage-academic-year')?.addEventListener('change', () => {
+    const selectedYear = document.getElementById('filter-manage-academic-year')?.value || getActiveAcademicYearLabel();
+    const yearClasses = getClassesForYear(selectedYear);
+    const opts = yearClasses.map(c => `<option value="${c}">${c}</option>`).join('');
+    const filterManage = document.getElementById('filter-manage-class');
+    if (filterManage) {
+        const prev = filterManage.value;
+        filterManage.innerHTML = `<option value="all">All Classes</option>` + opts + `<option value="GRADUATED">Graduated</option>`;
+        if (prev === 'all' || prev === 'GRADUATED' || yearClasses.includes(prev)) filterManage.value = prev;
+    }
+    renderStudentList();
+});
 document.getElementById('filter-manage-class').addEventListener('change', renderStudentList);
 document.getElementById('filter-manage-gender').addEventListener('change', renderStudentList);
 document.getElementById('filter-manage-status').addEventListener('change', renderStudentList);
@@ -3066,6 +3307,11 @@ document.getElementById('search-student-input').addEventListener('input', render
 document.getElementById('sort-manage-students').addEventListener('change', renderStudentList);
 
 document.getElementById('student-list-container').addEventListener('click', e => {
+    const histBtn = e.target.closest('.view-student-history-btn');
+    if(histBtn) {
+        openStudentHistoryModal(histBtn.dataset.id);
+        return;
+    }
     const delBtn = e.target.closest('.delete-student-btn'), editBtn = e.target.closest('.edit-student-btn');
     if(delBtn) {
         if(!confirm("Are you sure you want to permanently delete this student and all linked records?")) return;
@@ -3156,6 +3402,16 @@ document.getElementById('edit-student-update')?.addEventListener('click', async 
             status: normalizeStudentStatus(document.getElementById('e-stu-status')?.value || 'Active')
         }
     };
+    const activeYearForEdit = activeAcademicYear || currentAcademicYear;
+    const existingAcademicYears = existingStudent.academicYears || {};
+    updatedPayload.academicYears = {
+        ...existingAcademicYears,
+        [activeYearForEdit]: {
+            class: updatedClass,
+            status: updatedPayload.status,
+            updatedAt: new Date().toISOString()
+        }
+    };
     try {
         await updateDoc(doc(db, `${BASE_PATH}/students`, editingStudentId), updatedPayload);
         await setDoc(doc(db, `${BASE_PATH}/studentPhotoSubmissions`, editingStudentId), { photo: photoVal, updatedAt: Date.now() }, { merge: true });
@@ -3186,7 +3442,9 @@ const getManagedStudentsForExport = () => {
         if (!isNaN(numA) && !isNaN(numB) && numA !== numB) return numA - numB;
         return admA.localeCompare(admB, undefined, {numeric: true});
     };
-    const filtered = students.filter((s) => {
+    const selectedYear = document.getElementById('filter-manage-academic-year')?.value || getActiveAcademicYearLabel();
+    const yearStudents = getStudentsForYear(selectedYear);
+    const filtered = yearStudents.filter((s) => {
         let match = true;
         if(fCls !== 'all') {
             if (fCls === 'GRADUATED') match = match && (normalizeStudentStatus(s.status) === 'Graduated' || String(s.class || '').toUpperCase() === 'GRADUATED');
@@ -3210,12 +3468,15 @@ const getManagedStudentsForExport = () => {
     }
     return filtered;
 };
-const buildStudentExportRows = () => getManagedStudentsForExport().map((student, index) => {
-    const prof = student.profile || {};
-    return {
-        'Sl. No': index + 1,
-        'Photo': student.photo ? 'Yes' : 'No',
-        'Class': student.class || '',
+const buildStudentExportRows = () => {
+    const selectedYear = document.getElementById('filter-manage-academic-year')?.value || getActiveAcademicYearLabel();
+    return getManagedStudentsForExport().map((student, index) => {
+        const prof = student.profile || {};
+        return {
+            'Sl. No': index + 1,
+            'Academic Year': selectedYear,
+            'Photo': student.photo ? 'Yes' : 'No',
+            'Class': student.class || '',
         'ID/UID': student.uid || '',
         'Student Name': student.name || '',
         "Father's Name": student.father || '',
@@ -3293,6 +3554,491 @@ const exportStudentsToPDF = () => {
 document.getElementById('export-students-excel-btn')?.addEventListener('click', exportStudentsToExcel);
 document.getElementById('export-students-csv-btn')?.addEventListener('click', exportStudentsToCSV);
 document.getElementById('export-students-pdf-btn')?.addEventListener('click', exportStudentsToPDF);
+
+// --- 3.1 ANNUAL BULK PROMOTION SYSTEM ---
+let promotionDraft = [];
+
+const renderPromotionTool = () => {
+    const sourceYearSelect = document.getElementById('promote-source-year');
+    const sourceClassSelect = document.getElementById('promote-source-class');
+    const targetYearSelect = document.getElementById('promote-target-year');
+    if (!sourceYearSelect || !targetYearSelect || !sourceClassSelect) return;
+
+    const sortedYears = [...academicYears].sort((a, b) => (b.startYear || 0) - (a.startYear || 0));
+    if (sortedYears.length === 0) {
+        sourceYearSelect.innerHTML = `<option value="${escapeHtml(currentAcademicYear)}">${escapeHtml(currentAcademicYear)}</option>`;
+        targetYearSelect.innerHTML = `<option value="">No years configured</option>`;
+        return;
+    }
+
+    const currentSource = sourceYearSelect.value || getActiveAcademicYearLabel();
+    sourceYearSelect.innerHTML = sortedYears.map(y => {
+        const isCurrent = y.label === activeAcademicYear;
+        return `<option value="${escapeHtml(y.label)}">${escapeHtml(y.label)} ${isCurrent ? '(Current)' : ''}</option>`;
+    }).join('');
+
+    if (sortedYears.some(y => y.label === currentSource)) {
+        sourceYearSelect.value = currentSource;
+    } else {
+        sourceYearSelect.value = getActiveAcademicYearLabel();
+    }
+
+    const currentTarget = targetYearSelect.value;
+    targetYearSelect.innerHTML = sortedYears.map(y => `<option value="${escapeHtml(y.label)}">${escapeHtml(y.label)}</option>`).join('');
+
+    if (currentTarget && currentTarget !== sourceYearSelect.value && sortedYears.some(y => y.label === currentTarget)) {
+        targetYearSelect.value = currentTarget;
+    } else {
+        const nextYear = sortedYears.find(y => y.label !== sourceYearSelect.value && (y.startYear || 0) >= (sortedYears.find(s => s.label === sourceYearSelect.value)?.startYear || 0));
+        targetYearSelect.value = nextYear ? nextYear.label : (sortedYears.find(y => y.label !== sourceYearSelect.value)?.label || sortedYears[0]?.label || '');
+    }
+
+    populatePromotionSourceClasses();
+    loadPromotionRoster();
+};
+
+const populatePromotionSourceClasses = () => {
+    const sourceYear = document.getElementById('promote-source-year')?.value || getActiveAcademicYearLabel();
+    const sourceClassSelect = document.getElementById('promote-source-class');
+    if (!sourceClassSelect) return;
+    const currentVal = sourceClassSelect.value || 'all';
+
+    const yearClasses = getClassesForYear(sourceYear);
+    let opts = `<option value="all">All Classes</option>`;
+    yearClasses.forEach(c => {
+        opts += `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`;
+    });
+    sourceClassSelect.innerHTML = opts;
+    if (currentVal === 'all' || yearClasses.includes(currentVal)) {
+        sourceClassSelect.value = currentVal;
+    } else {
+        sourceClassSelect.value = 'all';
+    }
+};
+
+const updatePromotionMetrics = (draft = promotionDraft) => {
+    const totalEl = document.getElementById('promote-metric-total');
+    const promotedEl = document.getElementById('promote-metric-promoted');
+    const retainedEl = document.getElementById('promote-metric-retained');
+    const graduatedEl = document.getElementById('promote-metric-graduated');
+    const selectedBadge = document.getElementById('promote-selected-count-badge');
+
+    const total = draft.length;
+    const selectedList = draft.filter(item => item.selected);
+    const promoted = selectedList.filter(item => item.decision === 'promoted').length;
+    const retained = selectedList.filter(item => item.decision === 'retained').length;
+    const graduated = selectedList.filter(item => item.decision === 'graduated').length;
+
+    if (totalEl) totalEl.textContent = String(total);
+    if (promotedEl) promotedEl.textContent = String(promoted);
+    if (retainedEl) retainedEl.textContent = String(retained);
+    if (graduatedEl) graduatedEl.textContent = String(graduated);
+    if (selectedBadge) selectedBadge.textContent = `${selectedList.length} of ${total} students selected`;
+};
+
+const renderPromotionTable = () => {
+    const container = document.getElementById('promote-table-container');
+    if (!container) return;
+
+    const allSelected = promotionDraft.length > 0 && promotionDraft.every(item => item.selected);
+
+    let html = `
+    <table class="w-full text-sm text-left whitespace-nowrap">
+        <thead class="bg-gray-50 text-gray-700 text-xs font-bold uppercase tracking-wider border-b border-gray-200">
+            <tr>
+                <th class="p-3 w-10 text-center">
+                    <input type="checkbox" id="promote-select-all" class="w-4 h-4 text-indigo-600 rounded cursor-pointer" ${allSelected ? 'checked' : ''}>
+                </th>
+                <th class="p-3 w-12 text-center">Sl</th>
+                <th class="p-3 w-14">Photo</th>
+                <th class="p-3">Adm.No</th>
+                <th class="p-3">Student Name</th>
+                <th class="p-3">Current Class</th>
+                <th class="p-3 text-center">Progression Decision</th>
+                <th class="p-3">Destination Class (Next Year)</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-200 bg-white">`;
+
+    promotionDraft.forEach((item, index) => {
+        const photoUrl = item.photo;
+        const isPromoted = item.decision === 'promoted';
+        const isRetained = item.decision === 'retained';
+        const isGraduated = item.decision === 'graduated';
+
+        html += `
+        <tr class="hover:bg-indigo-50/30 transition ${item.selected ? 'bg-white' : 'bg-gray-50/50 opacity-60'}" data-student-id="${escapeHtml(item.studentId)}">
+            <td class="p-3 text-center">
+                <input type="checkbox" class="promo-row-select w-4 h-4 text-indigo-600 rounded cursor-pointer" data-id="${escapeHtml(item.studentId)}" ${item.selected ? 'checked' : ''}>
+            </td>
+            <td class="p-3 text-center font-bold text-gray-400 font-mono text-xs">${index + 1}</td>
+            <td class="p-3">
+                <div class="w-9 h-9 rounded-full overflow-hidden bg-slate-100 border border-slate-200 flex items-center justify-center shrink-0 shadow-inner">
+                    ${photoUrl ? `<img src="${photoUrl}" class="w-full h-full object-cover">` : `<i class="fas fa-user text-slate-400 text-xs"></i>`}
+                </div>
+            </td>
+            <td class="p-3 font-mono font-bold text-gray-600 text-xs">${escapeHtml(item.adm || '-')}</td>
+            <td class="p-3 font-bold text-gray-900">${escapeHtml(item.name || '-')}</td>
+            <td class="p-3 font-semibold text-gray-700">${escapeHtml(item.sourceClass || '--')}</td>
+            <td class="p-3 text-center">
+                <div class="inline-flex rounded-lg border border-gray-200 p-0.5 bg-gray-50 shadow-2xs">
+                    <button type="button" class="promo-decision-btn px-2.5 py-1 text-xs font-bold rounded-md transition flex items-center gap-1 ${isPromoted ? 'bg-emerald-600 text-white shadow-xs' : 'text-gray-600 hover:text-emerald-700'}" data-id="${escapeHtml(item.studentId)}" data-decision="promoted">
+                        <i class="fas fa-arrow-up text-[10px]"></i> Pass
+                    </button>
+                    <button type="button" class="promo-decision-btn px-2.5 py-1 text-xs font-bold rounded-md transition flex items-center gap-1 ${isRetained ? 'bg-amber-600 text-white shadow-xs' : 'text-gray-600 hover:text-amber-700'}" data-id="${escapeHtml(item.studentId)}" data-decision="retained">
+                        <i class="fas fa-redo text-[10px]"></i> Retain
+                    </button>
+                    <button type="button" class="promo-decision-btn px-2.5 py-1 text-xs font-bold rounded-md transition flex items-center gap-1 ${isGraduated ? 'bg-slate-700 text-white shadow-xs' : 'text-gray-600 hover:text-slate-700'}" data-id="${escapeHtml(item.studentId)}" data-decision="graduated">
+                        <i class="fas fa-user-graduate text-[10px]"></i> Graduated
+                    </button>
+                </div>
+            </td>
+            <td class="p-3">
+                <div class="flex items-center gap-2">
+                    <input type="text" class="promo-target-class-input p-1.5 border rounded-lg text-xs font-bold bg-white text-gray-800 w-36 border-gray-300 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500" data-id="${escapeHtml(item.studentId)}" value="${escapeHtml(item.targetClass || '')}" placeholder="Target Class">
+                </div>
+            </td>
+        </tr>`;
+    });
+
+    html += `</tbody></table>`;
+    container.innerHTML = html;
+};
+
+const loadPromotionRoster = () => {
+    const sourceYear = document.getElementById('promote-source-year')?.value || getActiveAcademicYearLabel();
+    const sourceClass = document.getElementById('promote-source-class')?.value || 'all';
+    const container = document.getElementById('promote-table-container');
+    const emptyState = document.getElementById('promote-table-empty-state');
+    const actionBar = document.getElementById('promote-action-bar');
+    const searchTerm = (document.getElementById('promote-search-input')?.value || '').toLowerCase().trim();
+
+    if (!container || !emptyState) return;
+
+    const yearStudents = getStudentsForYear(sourceYear);
+    let filteredStudents = yearStudents;
+
+    if (sourceClass !== 'all') {
+        filteredStudents = filteredStudents.filter(s => s.class === sourceClass);
+    }
+    if (searchTerm) {
+        filteredStudents = filteredStudents.filter(s => 
+            (s.name && s.name.toLowerCase().includes(searchTerm)) || 
+            (s.adm && String(s.adm).toLowerCase().includes(searchTerm))
+        );
+    }
+
+    if (filteredStudents.length === 0) {
+        emptyState.classList.remove('hidden');
+        container.classList.add('hidden');
+        if (actionBar) actionBar.classList.add('hidden');
+        updatePromotionMetrics([]);
+        return;
+    }
+
+    emptyState.classList.add('hidden');
+    container.classList.remove('hidden');
+    if (actionBar) actionBar.classList.remove('hidden');
+
+    const existingDraftMap = new Map(promotionDraft.map(item => [item.studentId, item]));
+
+    promotionDraft = filteredStudents.map((s) => {
+        const existing = existingDraftMap.get(s.id);
+        const sourceStudentClass = s.class || '';
+        const suggested = suggestNextClass(sourceStudentClass);
+        const isSeniorOrGrad = sourceStudentClass.toUpperCase() === 'GRADUATED' || suggested === 'GRADUATED';
+        const defaultDecision = isSeniorOrGrad ? 'graduated' : 'promoted';
+        const defaultTargetClass = defaultDecision === 'graduated' ? 'GRADUATED' : suggested;
+
+        return {
+            studentId: s.id,
+            name: s.name || '',
+            adm: s.adm || '',
+            photo: s.photo || s.profile?.photo || '',
+            gender: s.gender || '',
+            sourceClass: sourceStudentClass,
+            selected: existing ? existing.selected : true,
+            decision: existing ? existing.decision : defaultDecision,
+            suggestedClass: suggested,
+            targetClass: existing ? existing.targetClass : defaultTargetClass
+        };
+    });
+
+    renderPromotionTable();
+    updatePromotionMetrics(promotionDraft);
+};
+
+// Fast Batch Actions for Promotion
+document.getElementById('promote-set-all-pass-btn')?.addEventListener('click', () => {
+    promotionDraft.forEach(item => {
+        item.decision = 'promoted';
+        item.targetClass = item.suggestedClass || suggestNextClass(item.sourceClass);
+    });
+    renderPromotionTable();
+    updatePromotionMetrics();
+});
+
+document.getElementById('promote-set-all-retain-btn')?.addEventListener('click', () => {
+    promotionDraft.forEach(item => {
+        item.decision = 'retained';
+        item.targetClass = item.sourceClass;
+    });
+    renderPromotionTable();
+    updatePromotionMetrics();
+});
+
+document.getElementById('promote-set-all-graduate-btn')?.addEventListener('click', () => {
+    promotionDraft.forEach(item => {
+        item.decision = 'graduated';
+        item.targetClass = 'GRADUATED';
+    });
+    renderPromotionTable();
+    updatePromotionMetrics();
+});
+
+document.getElementById('promote-source-year')?.addEventListener('change', () => {
+    populatePromotionSourceClasses();
+    loadPromotionRoster();
+});
+document.getElementById('promote-source-class')?.addEventListener('change', loadPromotionRoster);
+document.getElementById('promote-target-year')?.addEventListener('change', () => {
+    updatePromotionMetrics();
+});
+document.getElementById('promote-search-input')?.addEventListener('input', loadPromotionRoster);
+
+// Roster Table Event Delegation
+document.getElementById('promote-table-container')?.addEventListener('click', (e) => {
+    if (e.target.id === 'promote-select-all') {
+        const checked = e.target.checked;
+        promotionDraft.forEach(item => item.selected = checked);
+        renderPromotionTable();
+        updatePromotionMetrics();
+        return;
+    }
+
+    const rowCheckbox = e.target.closest('.promo-row-select');
+    if (rowCheckbox) {
+        const studentId = rowCheckbox.dataset.id;
+        const item = promotionDraft.find(i => i.studentId === studentId);
+        if (item) {
+            item.selected = rowCheckbox.checked;
+            updatePromotionMetrics();
+            const row = rowCheckbox.closest('tr');
+            if (row) {
+                row.classList.toggle('opacity-60', !item.selected);
+                row.classList.toggle('bg-gray-50/50', !item.selected);
+            }
+        }
+        return;
+    }
+
+    const decisionBtn = e.target.closest('.promo-decision-btn');
+    if (decisionBtn) {
+        const studentId = decisionBtn.dataset.id;
+        const decision = decisionBtn.dataset.decision;
+        const item = promotionDraft.find(i => i.studentId === studentId);
+        if (item) {
+            item.decision = decision;
+            if (decision === 'promoted') {
+                item.targetClass = item.suggestedClass || suggestNextClass(item.sourceClass);
+            } else if (decision === 'retained') {
+                item.targetClass = item.sourceClass;
+            } else if (decision === 'graduated') {
+                item.targetClass = 'GRADUATED';
+            }
+            renderPromotionTable();
+            updatePromotionMetrics();
+        }
+        return;
+    }
+});
+
+document.getElementById('promote-table-container')?.addEventListener('input', (e) => {
+    const input = e.target.closest('.promo-target-class-input');
+    if (input) {
+        const studentId = input.dataset.id;
+        const item = promotionDraft.find(i => i.studentId === studentId);
+        if (item) {
+            item.targetClass = input.value.trim().toUpperCase();
+        }
+    }
+});
+
+// Bulk Promotion Confirmation and Execution
+document.getElementById('btn-open-promote-confirm')?.addEventListener('click', () => {
+    if (!requirePermission('students.manage')) return;
+    const sourceYear = document.getElementById('promote-source-year')?.value || '';
+    const targetYear = document.getElementById('promote-target-year')?.value || '';
+
+    if (!sourceYear || !targetYear) {
+        return alert('Please select both Source Academic Year and Target Academic Year.');
+    }
+    if (sourceYear === targetYear) {
+        return alert('Target Academic Year must be different from Source Academic Year.');
+    }
+
+    const selectedList = promotionDraft.filter(item => item.selected);
+    if (selectedList.length === 0) {
+        return alert('Please select at least one student to promote.');
+    }
+
+    const promoted = selectedList.filter(item => item.decision === 'promoted').length;
+    const retained = selectedList.filter(item => item.decision === 'retained').length;
+    const graduated = selectedList.filter(item => item.decision === 'graduated').length;
+
+    document.getElementById('confirm-promo-source-year').textContent = sourceYear;
+    document.getElementById('confirm-promo-target-year').textContent = targetYear;
+    document.getElementById('confirm-promo-promoted-count').textContent = String(promoted);
+    document.getElementById('confirm-promo-retained-count').textContent = String(retained);
+    document.getElementById('confirm-promo-graduated-count').textContent = String(graduated);
+
+    const popup = document.getElementById('promotion-confirm-popup');
+    if (popup) {
+        popup.classList.remove('hidden');
+        popup.classList.add('flex');
+    }
+});
+
+document.getElementById('promotion-confirm-cancel-btn')?.addEventListener('click', () => {
+    document.getElementById('promotion-confirm-popup')?.classList.add('hidden');
+    document.getElementById('promotion-confirm-popup')?.classList.remove('flex');
+});
+
+document.getElementById('promotion-confirm-execute-btn')?.addEventListener('click', async () => {
+    if (!requirePermission('students.manage')) return;
+    const executeBtn = document.getElementById('promotion-confirm-execute-btn');
+    const sourceYear = document.getElementById('promote-source-year')?.value || '';
+    const targetYear = document.getElementById('promote-target-year')?.value || '';
+    const selectedList = promotionDraft.filter(item => item.selected);
+
+    if (!selectedList.length) return alert('No students selected for promotion.');
+
+    try {
+        if (executeBtn) {
+            executeBtn.disabled = true;
+            executeBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1.5"></i> <span>Committing...</span>';
+        }
+
+        const nowIso = new Date().toISOString();
+        const operations = [];
+        const newClassesToSync = new Set();
+
+        selectedList.forEach((item) => {
+            const student = rawStudents.find(s => s.id === item.studentId) || {};
+            const existingHistory = student.academicYears || {};
+            const targetClassVal = item.targetClass || item.sourceClass;
+            const targetStatusVal = item.decision === 'graduated' ? 'Graduated' : 'Active';
+            const sourceStatusVal = item.decision === 'promoted' ? 'Promoted' : (item.decision === 'retained' ? 'Retained' : 'Graduated');
+
+            if (targetClassVal && targetClassVal !== 'GRADUATED') {
+                newClassesToSync.add(targetClassVal);
+            }
+
+            const updatedHistory = {
+                ...existingHistory,
+                [sourceYear]: {
+                    class: item.sourceClass,
+                    status: sourceStatusVal,
+                    decision: item.decision,
+                    updatedAt: nowIso
+                },
+                [targetYear]: {
+                    class: targetClassVal,
+                    status: targetStatusVal,
+                    decision: item.decision === 'retained' ? 'Retained' : 'Active',
+                    updatedAt: nowIso
+                }
+            };
+
+            const masterUpdate = {
+                academicYear: targetYear,
+                class: targetClassVal,
+                studentClass: targetClassVal,
+                status: targetStatusVal,
+                academicYears: updatedHistory,
+                updatedAt: nowIso
+            };
+
+            // 1. Update Master Student Document
+            operations.push((batch) => {
+                batch.update(doc(db, `${BASE_PATH}/students`, item.studentId), masterUpdate);
+            });
+
+            // 2. Set Target Academic Year Enrollment Record
+            operations.push((batch) => {
+                batch.set(
+                    getEnrollmentRef(targetYear, item.studentId),
+                    buildEnrollmentPayload(item.studentId, {
+                        ...student,
+                        ...masterUpdate,
+                        class: targetClassVal,
+                        academicYear: targetYear
+                    }),
+                    { merge: true }
+                );
+            });
+
+            // 3. Update Source Academic Year Historical Enrollment Record
+            operations.push((batch) => {
+                batch.set(
+                    getEnrollmentRef(sourceYear, item.studentId),
+                    buildEnrollmentPayload(item.studentId, {
+                        ...student,
+                        class: item.sourceClass,
+                        status: sourceStatusVal,
+                        academicYear: sourceYear
+                    }),
+                    { merge: true }
+                );
+            });
+        });
+
+        await runBatchedWrites(operations);
+
+        // Ensure newly formed classes are in target year classes list
+        if (newClassesToSync.size > 0) {
+            academicYears = academicYears.map(year => {
+                if (year.label !== targetYear) return year;
+                const existing = Array.isArray(year.classes) ? year.classes : [];
+                return {
+                    ...year,
+                    classes: sortClassLabels([...new Set([...existing, ...newClassesToSync])])
+                };
+            });
+            await persistAcademicYears();
+        }
+
+        await logAuditEvent({
+            category: 'student',
+            action: 'students.bulk_promoted',
+            entityType: 'academicYear',
+            entityId: targetYear,
+            message: `Promoted ${selectedList.length} students from ${sourceYear} to ${targetYear}.`,
+            metadata: {
+                sourceYear,
+                targetYear,
+                count: selectedList.length
+            }
+        });
+
+        document.getElementById('promotion-confirm-popup')?.classList.add('hidden');
+        document.getElementById('promotion-confirm-popup')?.classList.remove('flex');
+
+        showToast(`Successfully promoted ${selectedList.length} students into ${targetYear}! Historical records preserved.`, 'success');
+
+        promotionDraft = [];
+        loadPromotionRoster();
+        renderAcademicYears();
+    } catch (err) {
+        console.error('Failed to execute bulk promotion:', err);
+        alert('Failed to execute bulk promotion: ' + err.message);
+    } finally {
+        if (executeBtn) {
+            executeBtn.disabled = false;
+            executeBtn.innerHTML = '<i class="fas fa-check mr-1.5"></i> <span>Confirm & Commit Promotion</span>';
+        }
+    }
+});
 
 // --- 4. MANAGE CLASSES ---
 const renderClassList = () => {

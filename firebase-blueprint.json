@@ -68,6 +68,8 @@
         "status": { "type": "string" },
         "photoUrl": { "type": "string" },
         "concessionAmount": { "type": "number" },
+        "academicYear": { "type": "string" },
+        "academicYears": { "type": "object" },
         "notes": { "type": "string" },
         "updatedAt": { "type": "string" }
       },
